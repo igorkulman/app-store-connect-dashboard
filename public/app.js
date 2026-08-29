@@ -23,6 +23,8 @@ const moneyFallbackFormatter = new Intl.NumberFormat(undefined, {
 let appIconMap = new Map();
 let loadingCounter = 0;
 
+populateYearlyRangeOptions();
+
 refreshBtn.addEventListener("click", async () => {
   await loadApps().catch(() => {});
   loadMetrics({ force: true });
@@ -66,9 +68,15 @@ async function loadApps() {
 
 async function loadMetrics(options = {}) {
   const appId = appSelect.value;
-  const days = daysSelect.value || "30";
+  const [period, rangeValue] = (daysSelect.value || "daily:30").split(":");
 
-  const params = new URLSearchParams({ days });
+  const params = new URLSearchParams();
+  if (period === "yearly") {
+    params.set("period", "yearly");
+    params.set("year", rangeValue);
+  } else {
+    params.set("days", rangeValue);
+  }
   if (options.force) {
     params.set("refresh", "1");
   }
@@ -117,7 +125,7 @@ function render(data) {
   );
   dateRangeEl.textContent = `${data.startDate} to ${data.endDate}`;
 
-  drawSeriesChart(chartCanvas, data.series || []);
+  drawSeriesChart(chartCanvas, data.series || [], data.granularity);
   renderTopApps(data);
 }
 
@@ -130,7 +138,7 @@ function renderTopApps(data) {
     return;
   }
 
-  const rows = data.topApps || [];
+  const rows = data.appBreakdown || [];
   if (!rows.length) {
     topAppsBody.innerHTML = '<tr><td colspan="3">No data</td></tr>';
     return;
@@ -158,13 +166,15 @@ function renderAppNameCell(name, appId) {
   return `<span class="app-name-cell"><img class="app-icon" src="${safeIconUrl}" alt="" loading="lazy" decoding="async" /><span>${safeName}</span></span>`;
 }
 
-function drawSeriesChart(canvas, series) {
+function drawSeriesChart(canvas, series, granularity = "day") {
   if (!Array.isArray(series) || !series.length) {
     drawEmptyChart(canvas, "No data");
     return;
   }
 
-  const labels = series.map((point) => point.date.slice(5));
+  const labels = series.map((point) =>
+    granularity === "year" ? point.date : point.date.slice(5)
+  );
   const downloads = series.map((point) => Number(point.downloads) || 0);
   const purchases = series.map((point) => Number(point.purchases) || 0);
 
@@ -370,6 +380,19 @@ function setLoading(isLoading, message) {
   loadingOverlayEl.hidden = !visible;
   loadingOverlayEl.style.display = visible ? "grid" : "none";
   document.body.classList.toggle("is-loading", visible);
+}
+
+function populateYearlyRangeOptions() {
+  const group = document.getElementById("yearlyRangeOptions");
+  if (!group) {
+    return;
+  }
+
+  const latestCompletedYear = new Date().getUTCFullYear() - 1;
+  for (let year = latestCompletedYear; year >= 2008; year -= 1) {
+    group.append(new Option(String(year), `yearly:${year}`));
+  }
+  group.append(new Option("All completed years", "yearly:all"));
 }
 
 function escapeHtml(value) {

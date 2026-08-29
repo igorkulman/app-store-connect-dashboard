@@ -4,14 +4,14 @@ A self-hosted web dashboard that shows daily downloads, purchases, and revenue f
 
 ## Features
 
-- Downloads and purchases over a configurable date range (up to 10 years back)
+- Daily downloads and purchases over a configurable range (up to 365 days back), plus completed calendar-year reports
 - Gross sales and developer proceeds, converted to a single display currency
-- Per-app breakdown with app icons fetched automatically from the App Store
+- Per-app breakdown with app icons fetched automatically from the iTunes Lookup API (missing icons retry hourly)
 - SQLite cache — historical data is fetched once; only recent days are re-checked
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 20, 22, 23, 24, 25, or 26
 - An App Store Connect account with at least one app
 - An App Store Connect API key with **Sales and Reports** access
 
@@ -65,7 +65,7 @@ npm start
 
 5. Open `http://localhost:3000`
 
-The first load fetches historical data from App Store Connect — this may take a minute depending on how many days you request. Data is cached in `cache.sqlite` so subsequent loads are fast.
+The first load fetches historical data from App Store Connect — this may take a minute depending on how many days you request. Data is cached in `cache.sqlite` so subsequent loads are fast. Recent reports are rechecked periodically because Apple can revise them after initial publication; **Refresh** re-downloads the full selected range.
 
 ## Configuration
 
@@ -82,6 +82,9 @@ All configuration is via environment variables in `.env`:
 | `PORT` | No | `3000` | Port to run the server on |
 | `CACHE_DB_PATH` | No | `./cache.sqlite` | Path to the SQLite cache file |
 | `ASC_REQUEST_TIMEOUT_MS` | No | `30000` | Timeout for App Store Connect API requests |
+| `ASC_SALES_REPORT_RECHECK_DAYS` | No | `90` | Recent report days to recheck for Apple revisions |
+| `ASC_SALES_REPORT_REFRESH_TTL_MS` | No | `86400000` | Minimum time before rechecking a recent report |
+| `ASC_YEARLY_SALES_REPORT_REFRESH_TTL_MS` | No | `2592000000` | Minimum time before rechecking the latest completed annual report |
 | `ASC_SALES_REPORT_VERSION` | No | auto | Pin to a specific report version (leave unset) |
 
 *Provide either `ASC_PRIVATE_KEY_PATH` or `ASC_PRIVATE_KEY`.
@@ -109,7 +112,8 @@ If you already have Fastlane credentials set up, the following env var names are
 The server exposes two endpoints used by the frontend:
 
 - `GET /api/apps` — list of apps with names, bundle IDs, and icon URLs
-- `GET /api/metrics?days=30&appId=<optional>` — time series and totals; `days` accepts 1–3650
+- `GET /api/metrics?days=30&appId=<optional>` — daily time series and totals; `days` accepts 1–365
+- `GET /api/metrics?period=yearly&year=2025&appId=<optional>` — completed calendar-year totals; use `year=all` for all completed years
 
 ## Metric definitions
 

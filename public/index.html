@@ -31,15 +31,14 @@
         <label>
           Range
           <select id="daysSelect">
-            <option value="7">Last 7 days</option>
-            <option value="30" selected>Last 30 days</option>
-            <option value="90">Last 90 days</option>
-            <option value="180">Last 180 days</option>
-            <option value="365">Last 365 days</option>
-            <option value="730">Last 730 days</option>
-            <option value="1095">Last 3 years</option>
-            <option value="1825">Last 5 years</option>
-            <option value="3650">Last 10 years</option>
+            <optgroup label="Daily reports">
+              <option value="daily:7">Last 7 days</option>
+              <option value="daily:30" selected>Last 30 days</option>
+              <option value="daily:90">Last 90 days</option>
+              <option value="daily:180">Last 180 days</option>
+              <option value="daily:365">Last 365 days</option>
+            </optgroup>
+            <optgroup id="yearlyRangeOptions" label="Annual reports"></optgroup>
           </select>
         </label>
       </section>
@@ -80,7 +79,7 @@
       </section>
 
       <section id="topAppsPanel" class="table-panel">
-        <h2>Top Apps</h2>
+        <h2>Apps</h2>
         <table>
           <thead>
             <tr>

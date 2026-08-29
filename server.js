@@ -8,17 +8,33 @@ const {
   decodeSalesReport,
   aggregateDailyMetrics,
   mergePerAppTotals,
-  UNMAPPED_APP_ID,
 } = require("./lib/salesMetrics");
 const { CacheStore, DAILY_METRICS_CACHE_VERSION } = require("./lib/cacheStore");
+const {
+  DAILY_METRICS_CACHE_POLICY_VERSION,
+  DEFAULT_RECHECK_WINDOW_DAYS,
+  DEFAULT_REFRESH_TTL_MS,
+  DEFAULT_YEARLY_REFRESH_TTL_MS,
+  shouldRefreshCachedSalesMetrics,
+} = require("./lib/dailyMetricsCachePolicy");
 const { FxService } = require("./lib/fxService");
 const { IconService } = require("./lib/iconService");
 
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const APP_LIST_TTL_MS = 10 * 60 * 1000;
 const IAP_INDEX_TTL_MS = 60 * 60 * 1000;
-const RECENT_REPORT_REFRESH_TTL_MS = 6 * 60 * 60 * 1000;
-const RECENT_REPORT_WINDOW_DAYS = 3;
+const REPORT_REFRESH_TTL_MS = positiveIntegerEnv(
+  process.env.ASC_SALES_REPORT_REFRESH_TTL_MS,
+  DEFAULT_REFRESH_TTL_MS
+);
+const REPORT_RECHECK_WINDOW_DAYS = positiveIntegerEnv(
+  process.env.ASC_SALES_REPORT_RECHECK_DAYS,
+  DEFAULT_RECHECK_WINDOW_DAYS
+);
+const YEARLY_REPORT_REFRESH_TTL_MS = positiveIntegerEnv(
+  process.env.ASC_YEARLY_SALES_REPORT_REFRESH_TTL_MS,
+  DEFAULT_YEARLY_REFRESH_TTL_MS
+);
 
 const app = express();
 app.use(express.json());
@@ -67,7 +83,7 @@ app.get("/api/apps", async (req, res) => {
 
 app.get("/api/metrics", async (req, res) => {
   try {
-    const days = clampNumber(req.query.days, 30, 1, 3650);
+    const reportRequest = parseReportRequest(req.query);
     const selectedAppId = typeof req.query.appId === "string" ? req.query.appId.trim() : "";
     const forceRefresh = String(req.query.refresh || "") === "1";
 
@@ -85,9 +101,7 @@ app.get("/api/metrics", async (req, res) => {
       });
     }
 
-    const endDate = formatDateUtc(addDaysUtc(startOfTodayUtc(), -1));
-    const startDate = formatDateUtc(addDaysUtc(startOfTodayUtc(), -days));
-    const dates = buildDateRange(startDate, endDate);
+    const { frequency, granularity, days, startDate, endDate, reportDates } = reportRequest;
 
     const aggregationContext = {
       knownAppIds,
@@ -97,9 +111,11 @@ app.get("/api/metrics", async (req, res) => {
       iapToAppIdMap,
     };
 
-    const dailyData = await mapWithConcurrency(dates, 4, async (date) => {
-      const aggregated = await getDailyMetricsForDate(date, aggregationContext, { forceRefresh });
-      return { date, ...aggregated };
+    const reportData = await mapWithConcurrency(reportDates, 4, async (reportDate) => {
+      const aggregated = await getMetricsForReportDate(reportDate, frequency, aggregationContext, {
+        forceRefresh,
+      });
+      return { date: reportDate, ...aggregated };
     });
 
     let totalDownloads = 0;
@@ -108,7 +124,7 @@ app.get("/api/metrics", async (req, res) => {
     const totalProceedsByCurrency = new Map();
     const perAppTotals = new Map();
 
-    const series = dailyData.map((item) => {
+    const series = reportData.map((item) => {
       const scoped = selectedAppId
         ? item.byApp.get(selectedAppId) || createEmptyPerAppMetrics()
         : item;
@@ -129,16 +145,20 @@ app.get("/api/metrics", async (req, res) => {
       };
     });
 
-    const topApps = Array.from(perAppTotals.entries())
-      .filter(([appId]) => appId !== UNMAPPED_APP_ID)
-      .map(([appId, metrics]) => ({
-        appId,
-        name: appNameById.get(appId) || metrics.title || `App ${appId}`,
-        downloads: roundMetric(metrics.downloads),
-        purchases: roundMetric(metrics.purchases),
-      }))
-      .sort((a, b) => (b.downloads + b.purchases) - (a.downloads + a.purchases))
-      .slice(0, 10);
+    const appBreakdown = apps
+      .map((appEntry) => {
+        const metrics = perAppTotals.get(appEntry.id) || createEmptyPerAppMetrics();
+        return {
+          appId: appEntry.id,
+          name: appEntry.name || metrics.title || `App ${appEntry.id}`,
+          downloads: roundMetric(metrics.downloads),
+          purchases: roundMetric(metrics.purchases),
+        };
+      })
+      .sort(
+        (a, b) =>
+          b.downloads + b.purchases - (a.downloads + a.purchases) || a.name.localeCompare(b.name)
+      );
 
     const grossSales = buildMoneySummary(totalGrossSalesByCurrency);
     const proceeds = buildMoneySummary(totalProceedsByCurrency);
@@ -150,6 +170,8 @@ app.get("/api/metrics", async (req, res) => {
     res.json({
       data: {
         source: "salesReports",
+        frequency,
+        granularity,
         selectedAppId: selectedAppId || null,
         selectedAppName: selectedAppId ? appNameById.get(selectedAppId) || null : null,
         startDate,
@@ -164,10 +186,10 @@ app.get("/api/metrics", async (req, res) => {
           proceedsConverted,
         },
         series,
-        topApps,
+        appBreakdown,
         definitions: {
           downloads:
-            "Positive units from App Store first-time install product types (1, 1F, 1T, 1E, 1EP, 1EU, F1) in the daily SALES summary report. Updates and re-downloads are excluded.",
+            `Positive units from App Store first-time install product types (1, 1F, 1T, 1E, 1EP, 1EU, F1) in the ${frequency.toLowerCase()} SALES summary report. Updates and re-downloads are excluded.`,
           purchases:
             "Positive units with positive customer price or developer proceeds, excluding update/redownload product types.",
           grossSales:
@@ -202,23 +224,29 @@ async function getApps() {
   return apps;
 }
 
-async function getDailyMetricsForDate(reportDate, aggregationContext, options = {}) {
+async function getMetricsForReportDate(reportDate, frequency, aggregationContext, options = {}) {
   const forceRefresh = options.forceRefresh === true;
-  const cached = cacheStore.getDailyMetrics(reportDate, DAILY_METRICS_CACHE_VERSION);
+  const cached = cacheStore.getSalesMetrics(reportDate, frequency, DAILY_METRICS_CACHE_VERSION);
   if (
     cached?.payload &&
-    !shouldRefreshCachedDailyMetrics(reportDate, cached.fetchedAt, { forceRefresh })
+    !shouldRefreshCachedSalesMetrics(reportDate, frequency, cached, {
+      forceRefresh,
+      refreshTtlMs: REPORT_REFRESH_TTL_MS,
+      recheckWindowDays: REPORT_RECHECK_WINDOW_DAYS,
+      yearlyRefreshTtlMs: YEARLY_REPORT_REFRESH_TTL_MS,
+    })
   ) {
     return deserializeDailyMetrics(cached.payload);
   }
 
   try {
-    const reportBuffer = await ascClient.downloadDailySalesSummary(reportDate);
+    const reportBuffer = await ascClient.downloadSalesSummary(reportDate, frequency);
     const rows = decodeSalesReport(reportBuffer);
     const aggregated = aggregateDailyMetrics(rows, aggregationContext);
 
-    cacheStore.saveDailyMetrics(
+    cacheStore.saveSalesMetrics(
       reportDate,
+      frequency,
       DAILY_METRICS_CACHE_VERSION,
       serializeDailyMetrics(aggregated),
       Date.now()
@@ -226,10 +254,12 @@ async function getDailyMetricsForDate(reportDate, aggregationContext, options = 
 
     return aggregated;
   } catch (error) {
-    if (error.status === 404) {
+    // Some vendors return 410 rather than 404 for unavailable historical annual reports.
+    if (error.status === 404 || (frequency === "YEARLY" && error.status === 410)) {
       const empty = createEmptyDailyMetrics();
-      cacheStore.saveDailyMetrics(
+      cacheStore.saveSalesMetrics(
         reportDate,
+        frequency,
         DAILY_METRICS_CACHE_VERSION,
         serializeDailyMetrics(empty),
         Date.now()
@@ -358,6 +388,70 @@ function handleRouteError(res, error) {
   });
 }
 
+function parseReportRequest(query) {
+  const period = String(query.period || "daily").trim().toLowerCase();
+
+  if (period === "yearly") {
+    return buildYearlyReportRequest(query.year);
+  }
+
+  if (period !== "daily") {
+    throw createBadRequestError("period must be either 'daily' or 'yearly'.");
+  }
+
+  const days = clampNumber(query.days, 30, 1, 365);
+  const endDate = formatDateUtc(addDaysUtc(startOfTodayUtc(), -1));
+  const startDate = formatDateUtc(addDaysUtc(startOfTodayUtc(), -days));
+
+  return {
+    frequency: "DAILY",
+    granularity: "day",
+    days,
+    startDate,
+    endDate,
+    reportDates: buildDateRange(startDate, endDate),
+  };
+}
+
+function buildYearlyReportRequest(rawYear) {
+  const firstAvailableYear = 2008;
+  const latestCompletedYear = startOfTodayUtc().getUTCFullYear() - 1;
+  const requestedYear = String(rawYear || "").trim().toLowerCase();
+
+  let startYear;
+  let endYear;
+  if (requestedYear === "all") {
+    startYear = firstAvailableYear;
+    endYear = latestCompletedYear;
+  } else if (/^\d{4}$/.test(requestedYear)) {
+    startYear = Number.parseInt(requestedYear, 10);
+    endYear = startYear;
+  } else {
+    throw createBadRequestError("year must be a completed four-digit calendar year or 'all'.");
+  }
+
+  if (startYear < firstAvailableYear || endYear > latestCompletedYear) {
+    throw createBadRequestError(
+      `year must be between ${firstAvailableYear} and ${latestCompletedYear}, or 'all'.`
+    );
+  }
+
+  return {
+    frequency: "YEARLY",
+    granularity: "year",
+    days: null,
+    startDate: String(startYear),
+    endDate: String(endYear),
+    reportDates: buildYearRange(startYear, endYear),
+  };
+}
+
+function createBadRequestError(message) {
+  const error = new Error(message);
+  error.status = 400;
+  return error;
+}
+
 function buildDateRange(startDate, endDate) {
   const values = [];
   let cursor = new Date(`${startDate}T00:00:00.000Z`);
@@ -371,27 +465,12 @@ function buildDateRange(startDate, endDate) {
   return values;
 }
 
-function shouldRefreshCachedDailyMetrics(reportDate, fetchedAt, options = {}) {
-  const forceRefresh = options.forceRefresh === true;
-  if (!Number.isFinite(fetchedAt) || fetchedAt <= 0) {
-    return true;
+function buildYearRange(startYear, endYear) {
+  const years = [];
+  for (let year = startYear; year <= endYear; year += 1) {
+    years.push(String(year));
   }
-
-  const reportDateValue = new Date(`${reportDate}T00:00:00.000Z`);
-  if (Number.isNaN(reportDateValue.getTime())) {
-    return true;
-  }
-
-  const recentWindowStart = addDaysUtc(startOfTodayUtc(), -RECENT_REPORT_WINDOW_DAYS);
-  const isRecentReport = reportDateValue >= recentWindowStart;
-  if (forceRefresh) {
-    return isRecentReport;
-  }
-  if (!isRecentReport) {
-    return false;
-  }
-
-  return Date.now() - fetchedAt >= RECENT_REPORT_REFRESH_TTL_MS;
+  return years;
 }
 
 function startOfTodayUtc() {
@@ -419,6 +498,11 @@ function clampNumber(value, fallback, min, max) {
   return Math.min(max, Math.max(min, parsed));
 }
 
+function positiveIntegerEnv(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function roundMetric(value) {
   return Math.round(value * 100) / 100;
 }
@@ -434,6 +518,7 @@ function serializeDailyMetrics(aggregated) {
   const byAppEntries = aggregated?.byApp instanceof Map ? Array.from(aggregated.byApp.entries()) : [];
 
   return {
+    cachePolicyVersion: DAILY_METRICS_CACHE_POLICY_VERSION,
     downloads: toFiniteNumber(aggregated?.downloads),
     purchases: toFiniteNumber(aggregated?.purchases),
     grossSalesByCurrency: serializeCurrencyMap(aggregated?.grossSalesByCurrency),
