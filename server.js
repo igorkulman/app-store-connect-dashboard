@@ -19,6 +19,7 @@ const {
 } = require("./lib/dailyMetricsCachePolicy");
 const { FxService } = require("./lib/fxService");
 const { IconService } = require("./lib/iconService");
+const { mapWithConcurrency } = require("./lib/concurrency");
 
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const APP_LIST_TTL_MS = 10 * 60 * 1000;
@@ -667,24 +668,4 @@ function asArray(value) {
 function toFiniteNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
-}
-
-async function mapWithConcurrency(items, concurrency, mapper) {
-  const results = new Array(items.length);
-  let index = 0;
-
-  const workers = Array.from({ length: Math.max(1, concurrency) }, async () => {
-    while (true) {
-      const currentIndex = index;
-      if (currentIndex >= items.length) {
-        return;
-      }
-
-      index += 1;
-      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
-    }
-  });
-
-  await Promise.all(workers);
-  return results;
 }
