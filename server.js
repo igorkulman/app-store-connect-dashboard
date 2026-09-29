@@ -532,6 +532,7 @@ function serializeDailyMetrics(aggregated) {
         title: String(metrics?.title || ""),
         grossSalesByCurrency: serializeCurrencyMap(metrics?.grossSalesByCurrency),
         proceedsByCurrency: serializeCurrencyMap(metrics?.proceedsByCurrency),
+        downloadsByCountry: serializeCountMap(metrics?.downloadsByCountry),
       },
     ]),
     rowCount: Math.max(0, Math.round(toFiniteNumber(aggregated?.rowCount))),
@@ -561,6 +562,7 @@ function deserializeDailyMetrics(payload) {
       title: String(metrics.title || ""),
       grossSalesByCurrency: deserializeCurrencyMap(metrics.grossSalesByCurrency),
       proceedsByCurrency: deserializeCurrencyMap(metrics.proceedsByCurrency),
+      downloadsByCountry: deserializeCountMap(metrics.downloadsByCountry),
     });
   }
 
@@ -617,6 +619,25 @@ function deserializeCurrencyMap(payload) {
   return map;
 }
 
+function serializeCountMap(map) {
+  if (!(map instanceof Map)) {
+    return [];
+  }
+
+  return Array.from(map.entries()).filter(([, count]) => toFiniteNumber(count) > 0);
+}
+
+function deserializeCountMap(payload) {
+  const map = new Map();
+  for (const entry of asArray(payload)) {
+    if (Array.isArray(entry) && entry.length === 2 && entry[0] && toFiniteNumber(entry[1]) > 0) {
+      map.set(String(entry[0]), toFiniteNumber(entry[1]));
+    }
+  }
+
+  return map;
+}
+
 function createEmptyPerAppMetrics() {
   return {
     downloads: 0,
@@ -624,6 +645,7 @@ function createEmptyPerAppMetrics() {
     title: "",
     grossSalesByCurrency: new Map(),
     proceedsByCurrency: new Map(),
+    downloadsByCountry: new Map(),
   };
 }
 
