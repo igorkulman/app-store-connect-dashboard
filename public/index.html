@@ -86,10 +86,30 @@
               <th>App</th>
               <th>Downloads</th>
               <th>Purchases</th>
+              <th title="All-time App Store rating in the countries where your apps were downloaded">Rating</th>
             </tr>
           </thead>
           <tbody id="topAppsBody"></tbody>
         </table>
+      </section>
+
+      <section id="feedbackPanel" class="table-panel feedback-panel">
+        <div class="feedback-header">
+          <div class="panel-title">
+            <h2>
+              Ratings &amp; reviews
+              <span id="reviewsNewBadge" class="new-badge" hidden></span>
+            </h2>
+            <p id="feedbackSubtitle">All time, not affected by the date range.</p>
+          </div>
+          <div class="feedback-actions">
+            <div id="ratingSummary" class="rating-summary" hidden></div>
+            <button id="markReviewsReadBtn" class="button button-secondary" hidden>Mark as read</button>
+          </div>
+        </div>
+        <p id="reviewsNote" class="reviews-note" hidden></p>
+        <ol id="reviewsList" class="reviews-list"></ol>
+        <button id="showAllReviewsBtn" class="link-button" hidden></button>
       </section>
     </main>
 

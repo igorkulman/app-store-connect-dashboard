@@ -19,7 +19,10 @@ const {
 } = require("./lib/dailyMetricsCachePolicy");
 const { FxService } = require("./lib/fxService");
 const { IconService } = require("./lib/iconService");
+const { RatingsService } = require("./lib/ratingsService");
+const { ReviewsService } = require("./lib/reviewsService");
 const { mapWithConcurrency } = require("./lib/concurrency");
+const { territoryToCountryCode } = require("./lib/territories");
 
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const APP_LIST_TTL_MS = 10 * 60 * 1000;
@@ -56,6 +59,8 @@ const fxService = new FxService(cacheStore, {
   displayCurrency: process.env.DISPLAY_CURRENCY || "USD",
 });
 const iconService = new IconService(cacheStore);
+const ratingsService = new RatingsService(cacheStore, { getRatingCountries });
+const reviewsService = new ReviewsService(ascClient, cacheStore);
 
 const appListCache = {
   apps: [],
@@ -207,6 +212,36 @@ app.get("/api/metrics", async (req, res) => {
   }
 });
 
+app.get("/api/ratings", async (req, res) => {
+  try {
+    const apps = await getApps();
+    const appIds = apps.map((entry) => entry.id);
+    ratingsService.ensureFresh(appIds);
+    res.json({ data: ratingsService.getRatings(appIds) });
+  } catch (error) {
+    handleRouteError(res, error);
+  }
+});
+
+app.get("/api/reviews", async (req, res) => {
+  try {
+    const selectedAppId = typeof req.query.appId === "string" ? req.query.appId.trim() : "";
+    const forceRefresh = String(req.query.refresh || "") === "1";
+    const apps = await getApps();
+
+    if (selectedAppId && !apps.some((entry) => entry.id === selectedAppId)) {
+      return res.status(400).json({
+        error: `Unknown appId '${selectedAppId}'. Use /api/apps to get valid IDs.`,
+      });
+    }
+
+    const targetApps = selectedAppId ? apps.filter((entry) => entry.id === selectedAppId) : apps;
+    res.json({ data: await reviewsService.getReviews(targetApps, { forceRefresh }) });
+  } catch (error) {
+    handleRouteError(res, error);
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Dashboard server running on http://localhost:${PORT}`);
 });
@@ -223,6 +258,28 @@ async function getApps() {
   appListCache.expiresAt = now + APP_LIST_TTL_MS;
 
   return apps;
+}
+
+// Countries where ratings can exist: first-time downloads in any cached sales report (most
+// downloads first), plus the countries of written reviews, which may predate the cached reports.
+function getRatingCountries() {
+  const totals = new Map();
+  for (const payload of cacheStore.getAllSalesMetricsPayloads(DAILY_METRICS_CACHE_VERSION)) {
+    for (const metrics of deserializeDailyMetrics(payload).byApp.values()) {
+      for (const [country, downloads] of metrics.downloadsByCountry.entries()) {
+        totals.set(country, (totals.get(country) || 0) + downloads);
+      }
+    }
+  }
+
+  const countries = Array.from(totals.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([country]) => country);
+  for (const review of cacheStore.getAllCachedCustomerReviews()) {
+    countries.push(territoryToCountryCode(review?.territory));
+  }
+
+  return Array.from(new Set(countries.filter(Boolean)));
 }
 
 async function getMetricsForReportDate(reportDate, frequency, aggregationContext, options = {}) {

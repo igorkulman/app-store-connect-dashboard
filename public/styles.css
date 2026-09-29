@@ -12,6 +12,8 @@
   --accent-gross: #cc7f16;
   --accent-proceeds: #1f8f9a;
   --accent-range: #4a5f7a;
+  --accent-rating: #e0a100;
+  --accent-new: #0b63f3;
 }
 
 * {
@@ -327,6 +329,230 @@ tbody tr:nth-child(even) {
   background: linear-gradient(135deg, #6e7f96, #46586f);
 }
 
+.muted {
+  color: var(--muted);
+}
+
+.rating {
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.rating-star {
+  color: var(--accent-rating);
+}
+
+.rating-count {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.rating-few {
+  opacity: 0.6;
+}
+
+.rating-delta {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.rating-delta-up {
+  color: #0b6b53;
+  background: #e2f6ee;
+}
+
+.rating-delta-down {
+  color: #a3352c;
+  background: #fdecea;
+}
+
+.feedback-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.feedback-panel .panel-title h2 {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.feedback-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.rating-summary {
+  text-align: right;
+  font-size: 0.95rem;
+}
+
+.rating-summary-storefronts {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.new-badge,
+.new-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-new);
+  color: #fff;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.new-badge[hidden],
+.button[hidden],
+.link-button[hidden] {
+  display: none;
+}
+
+.button-secondary {
+  padding: 7px 12px;
+  background: var(--panel);
+  color: var(--accent-downloads);
+  border: 1px solid #c9d8e7;
+  box-shadow: none;
+  font-size: 0.86rem;
+}
+
+.reviews-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.reviews-note-error {
+  color: #b91c1c;
+}
+
+.reviews-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.review {
+  padding: 12px 10px 12px 12px;
+  border-bottom: 1px solid #edf3f8;
+  border-left: 3px solid transparent;
+}
+
+.review:last-child {
+  border-bottom: 0;
+}
+
+.review-new {
+  border-left-color: var(--accent-new);
+  background: #f4f8ff;
+}
+
+.review-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.stars {
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+
+.stars-on {
+  color: var(--accent-rating);
+}
+
+.stars-off {
+  color: #d5dde6;
+}
+
+.review-title {
+  font-size: 0.97rem;
+}
+
+.review-body {
+  margin: 6px 0 0;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+  font-size: 0.93rem;
+}
+
+.review-meta {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.review-meta .app-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+}
+
+.review-meta .app-name-cell {
+  gap: 6px;
+}
+
+.review-response {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  font-size: 0.88rem;
+}
+
+.review-response-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.review-response p {
+  margin: 4px 0 0;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.link-button {
+  margin-top: 8px;
+  padding: 6px 0;
+  border: 0;
+  background: none;
+  color: var(--accent-downloads);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
 @keyframes riseIn {
   from {
     opacity: 0;
@@ -365,6 +591,27 @@ tbody tr:nth-child(even) {
 
   .cards {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .feedback-header {
+    flex-direction: column;
+  }
+
+  .feedback-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .rating-summary {
+    text-align: left;
+  }
+
+  .button.button-secondary {
+    width: auto;
+  }
+
+  .table-panel {
+    overflow-x: auto;
   }
 }
 

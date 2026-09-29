@@ -14,23 +14,74 @@ const statusEl = document.getElementById("status");
 const chartCanvas = document.getElementById("chart");
 const loadingOverlayEl = document.getElementById("loadingOverlay");
 const loadingTextEl = document.getElementById("loadingText");
+const feedbackSubtitleEl = document.getElementById("feedbackSubtitle");
+const reviewsNewBadgeEl = document.getElementById("reviewsNewBadge");
+const ratingSummaryEl = document.getElementById("ratingSummary");
+const markReviewsReadBtn = document.getElementById("markReviewsReadBtn");
+const reviewsNoteEl = document.getElementById("reviewsNote");
+const reviewsListEl = document.getElementById("reviewsList");
+const showAllReviewsBtn = document.getElementById("showAllReviewsBtn");
+
+const REVIEWS_PREVIEW_COUNT = 10;
+const FEW_RATINGS_THRESHOLD = 5;
+const RATINGS_POLL_MS = 15000;
+const SEEN_REVIEWS_STORAGE_KEY = "appStoreDashboard.seenReviews";
+const MAX_SEEN_REVIEW_IDS = 5000;
 
 const numberFormatter = new Intl.NumberFormat();
 const moneyFallbackFormatter = new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
+const ratingFormatter = new Intl.NumberFormat(undefined, {
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
+const reviewDateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+const reviewDateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+const snapshotDateFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeZone: "UTC",
+});
+const relativeTimeFormatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+const regionNames = createRegionNames();
 let appIconMap = new Map();
 let loadingCounter = 0;
+let lastMetricsData = null;
+let ratingsState = { loaded: false, error: "", updatedAt: null, refreshing: null, byAppId: new Map() };
+let ratingsPollTimer = null;
+let reviewsState = { status: "idle", scope: null, access: "ok", reviews: [], error: "" };
+let reviewsRequestId = 0;
+let showAllReviews = false;
+const seenReviews = readSeenReviews();
 
 populateYearlyRangeOptions();
 
 refreshBtn.addEventListener("click", async () => {
   await loadApps().catch(() => {});
-  loadMetrics({ force: true });
+  loadReviews({ force: true });
+  await loadMetrics({ force: true });
+  loadRatings();
 });
-appSelect.addEventListener("change", () => loadMetrics());
-daysSelect.addEventListener("change", () => loadMetrics());
+appSelect.addEventListener("change", () => {
+  loadMetrics();
+  showAllReviews = false;
+  renderRatingSummary();
+  loadReviews();
+});
+// Ratings are looked up in the countries found in the loaded sales reports, so a longer range can add some.
+daysSelect.addEventListener("change", async () => {
+  await loadMetrics();
+  loadRatings();
+});
+markReviewsReadBtn.addEventListener("click", markReviewsAsRead);
+showAllReviewsBtn.addEventListener("click", () => {
+  showAllReviews = !showAllReviews;
+  renderReviews();
+});
 
 initialize().catch((error) => showStatus(error.message, true));
 
@@ -47,7 +98,9 @@ async function initialize() {
       appSelect.append(new Option(`${app.name} (${app.bundleId})`, app.id));
     }
 
+    loadReviews();
     await loadMetrics();
+    loadRatings();
   } finally {
     setLoading(false);
   }
@@ -109,6 +162,7 @@ async function loadMetrics(options = {}) {
 }
 
 function render(data) {
+  lastMetricsData = data;
   downloadsTotalEl.textContent = formatMetric(data.totals.downloads);
   purchasesTotalEl.textContent = formatMetric(data.totals.purchases);
   renderConvertedMoneySummary(
@@ -140,7 +194,7 @@ function renderTopApps(data) {
 
   const rows = data.appBreakdown || [];
   if (!rows.length) {
-    topAppsBody.innerHTML = '<tr><td colspan="3">No data</td></tr>';
+    topAppsBody.innerHTML = '<tr><td colspan="4">No data</td></tr>';
     return;
   }
 
@@ -149,7 +203,7 @@ function renderTopApps(data) {
       (row) =>
         `<tr><td>${renderAppNameCell(row.name, row.appId)}</td><td>${formatMetric(row.downloads)}</td><td>${formatMetric(
           row.purchases
-        )}</td></tr>`
+        )}</td><td>${renderRatingCell(row.appId)}</td></tr>`
     )
     .join("");
 }
@@ -164,6 +218,373 @@ function renderAppNameCell(name, appId) {
   }
 
   return `<span class="app-name-cell"><img class="app-icon" src="${safeIconUrl}" alt="" loading="lazy" decoding="async" /><span>${safeName}</span></span>`;
+}
+
+async function loadRatings() {
+  try {
+    const response = await fetch("/api/ratings");
+    const payload = await response.json();
+
+    if (!response.ok) {
+      throw new Error(payload.error || "Failed to load ratings.");
+    }
+
+    const data = payload.data || {};
+    ratingsState = {
+      loaded: true,
+      error: "",
+      updatedAt: data.updatedAt || null,
+      refreshing: data.refreshing || null,
+      byAppId: new Map((data.apps || []).map((entry) => [entry.appId, entry])),
+    };
+  } catch (error) {
+    ratingsState = { ...ratingsState, loaded: true, error: error.message };
+  }
+
+  // Ratings are collected in the background storefront by storefront; poll until that finishes.
+  clearTimeout(ratingsPollTimer);
+  ratingsPollTimer = ratingsState.refreshing ? setTimeout(loadRatings, RATINGS_POLL_MS) : null;
+
+  if (lastMetricsData) {
+    renderTopApps(lastMetricsData);
+  }
+  renderRatingSummary();
+  renderFeedbackSubtitle();
+}
+
+function isCollectingRatings() {
+  return !ratingsState.loaded || Boolean(ratingsState.refreshing && !ratingsState.updatedAt);
+}
+
+function renderRatingCell(appId) {
+  const rating = ratingsState.byAppId.get(appId);
+  if (rating?.count) {
+    return renderRatingValue(rating);
+  }
+
+  if (ratingsState.error && !ratingsState.byAppId.size) {
+    return `<span class="muted" title="${escapeHtml(ratingsState.error)}">–</span>`;
+  }
+
+  if (isCollectingRatings()) {
+    return '<span class="muted" title="Collecting ratings">…</span>';
+  }
+
+  return '<span class="muted">No ratings</span>';
+}
+
+function renderRatingValue(rating, countLabel = "") {
+  const isFew = rating.count < FEW_RATINGS_THRESHOLD;
+  const title = buildRatingTooltip(rating);
+
+  return `<span class="rating${isFew ? " rating-few" : ""}" title="${escapeHtml(title)}"><span class="rating-star" aria-hidden="true">★</span> ${ratingFormatter.format(
+    rating.average
+  )}<span class="rating-count"> · ${formatMetric(rating.count)}${countLabel}</span></span>${renderRatingDelta(
+    rating.delta
+  )}`;
+}
+
+function renderRatingDelta(delta) {
+  if (!delta?.count) {
+    return "";
+  }
+
+  const sign = delta.count > 0 ? "+" : "−";
+  const amount = formatMetric(Math.abs(delta.count));
+  const title = `${sign}${amount} ${pluralize(Math.abs(delta.count), "rating")} since ${formatSnapshotDate(delta.since)}`;
+  const className = delta.count > 0 ? "rating-delta-up" : "rating-delta-down";
+
+  return ` <span class="rating-delta ${className}" title="${escapeHtml(title)}">${sign}${amount}</span>`;
+}
+
+function buildRatingTooltip(rating) {
+  const lines = [`Average ${rating.average} from ${formatMetric(rating.count)} ${pluralize(rating.count, "rating")}`];
+  if (rating.count < FEW_RATINGS_THRESHOLD) {
+    lines.push("Too few ratings for a reliable average");
+  }
+
+  const storefronts = formatStorefrontBreakdown(rating.storefronts, 8);
+  if (storefronts) {
+    lines.push(storefronts);
+  }
+
+  return lines.join("\n");
+}
+
+function formatStorefrontBreakdown(storefronts, limit) {
+  const entries = Array.isArray(storefronts) ? storefronts : [];
+  const shown = entries
+    .slice(0, limit)
+    .map((entry) => `${countryName(entry.country)} ${formatMetric(entry.count)}`);
+  if (entries.length > limit) {
+    shown.push(`${entries.length - limit} more`);
+  }
+  return shown.join(" · ");
+}
+
+function renderRatingSummary() {
+  const appId = appSelect.value;
+  if (!appId || !ratingsState.loaded) {
+    ratingSummaryEl.hidden = true;
+    ratingSummaryEl.innerHTML = "";
+    return;
+  }
+
+  const rating = ratingsState.byAppId.get(appId);
+  if (rating?.count) {
+    const storefronts = formatStorefrontBreakdown(rating.storefronts, 5);
+    ratingSummaryEl.innerHTML = `<div>${renderRatingValue(rating, ` ${pluralize(rating.count, "rating")}`)}</div>${
+      storefronts ? `<div class="rating-summary-storefronts">${escapeHtml(storefronts)}</div>` : ""
+    }`;
+  } else {
+    ratingSummaryEl.innerHTML = `<span class="muted">${isCollectingRatings() ? "Collecting ratings…" : "No ratings yet"}</span>`;
+  }
+
+  ratingSummaryEl.hidden = false;
+}
+
+function renderFeedbackSubtitle() {
+  let text = "All time, not affected by the date range.";
+  const refreshing = ratingsState.refreshing;
+  if (refreshing) {
+    text += ` Updating ratings (${refreshing.done}/${refreshing.total} countries)…`;
+  } else if (ratingsState.updatedAt) {
+    text += ` Ratings updated ${formatSnapshotDate(ratingsState.updatedAt)}.`;
+  }
+  feedbackSubtitleEl.textContent = text;
+}
+
+async function loadReviews(options = {}) {
+  const requestId = ++reviewsRequestId;
+  const scope = appSelect.value;
+  const params = new URLSearchParams();
+  if (scope) {
+    params.set("appId", scope);
+  }
+  if (options.force) {
+    params.set("refresh", "1");
+  }
+
+  // Keep the current list visible while refreshing the same scope; clear it when switching apps.
+  const keepReviews = reviewsState.scope === scope;
+  reviewsState = {
+    ...reviewsState,
+    status: "loading",
+    scope,
+    reviews: keepReviews ? reviewsState.reviews : [],
+  };
+  renderReviews();
+
+  try {
+    const response = await fetch(`/api/reviews?${params.toString()}`);
+    const payload = await response.json();
+
+    if (!response.ok) {
+      throw new Error(payload.error || "Failed to load reviews.");
+    }
+
+    if (requestId !== reviewsRequestId) {
+      return;
+    }
+
+    const access = payload.data?.access || "ok";
+    const reviews = payload.data?.reviews || [];
+    reviewsState = { status: "ready", scope, access, reviews, error: "" };
+    if (access === "ok") {
+      seedSeenReviews(scope ? [scope] : Array.from(appIconMap.keys()), reviews);
+    }
+  } catch (error) {
+    if (requestId !== reviewsRequestId) {
+      return;
+    }
+
+    reviewsState = { status: "error", scope, access: "ok", reviews: [], error: error.message };
+  }
+
+  renderReviews();
+}
+
+function renderReviews() {
+  const { status, access, reviews, error } = reviewsState;
+
+  const newCount = reviews.filter(isNewReview).length;
+  reviewsNewBadgeEl.hidden = newCount === 0;
+  reviewsNewBadgeEl.textContent = `${formatMetric(newCount)} new`;
+  markReviewsReadBtn.hidden = newCount === 0;
+
+  let note = "";
+  if (status === "error") {
+    note = `Couldn't load reviews: ${error}`;
+  } else if (status === "loading" && !reviews.length) {
+    note = "Loading reviews…";
+  } else if (access === "forbidden") {
+    note =
+      "This API key can't read customer reviews. Written reviews need a key with the Customer Support or Admin role; ratings come from the public App Store and still work.";
+  } else if (status === "ready" && !reviews.length) {
+    note = "No written reviews yet.";
+  }
+  reviewsNoteEl.textContent = note;
+  reviewsNoteEl.hidden = !note;
+  reviewsNoteEl.classList.toggle("reviews-note-error", status === "error");
+
+  const visible = showAllReviews ? reviews : reviews.slice(0, REVIEWS_PREVIEW_COUNT);
+  reviewsListEl.innerHTML = visible.map(renderReviewItem).join("");
+
+  showAllReviewsBtn.hidden = reviews.length <= REVIEWS_PREVIEW_COUNT;
+  showAllReviewsBtn.textContent = showAllReviews
+    ? "Show fewer"
+    : `Show all ${formatMetric(reviews.length)} reviews`;
+}
+
+function renderReviewItem(review) {
+  const isNew = isNewReview(review);
+  const meta = [];
+
+  if (!reviewsState.scope) {
+    meta.push(renderAppNameCell(review.appName || "Unknown app", review.appId));
+  }
+  if (review.country) {
+    meta.push(`<span>${escapeHtml(countryName(review.country))}</span>`);
+  }
+  if (review.reviewerNickname) {
+    meta.push(`<span>${escapeHtml(review.reviewerNickname)}</span>`);
+  }
+  const createdAt = Date.parse(review.createdDate);
+  if (Number.isFinite(createdAt)) {
+    meta.push(
+      `<time datetime="${escapeHtml(review.createdDate)}" title="${escapeHtml(
+        reviewDateTimeFormatter.format(new Date(createdAt))
+      )}">${escapeHtml(formatReviewDate(createdAt))}</time>`
+    );
+  }
+
+  return `<li class="review${isNew ? " review-new" : ""}">
+    <div class="review-head">
+      ${renderStars(review.rating)}
+      <strong class="review-title">${escapeHtml(review.title || "Untitled")}</strong>
+      ${isNew ? '<span class="new-pill">New</span>' : ""}
+    </div>
+    ${review.body ? `<p class="review-body">${escapeHtml(review.body)}</p>` : ""}
+    <div class="review-meta">${meta.join('<span class="meta-sep" aria-hidden="true">·</span>')}</div>
+    ${renderReviewResponse(review.response)}
+  </li>`;
+}
+
+function renderStars(rating) {
+  const value = Math.max(0, Math.min(5, Math.round(Number(rating) || 0)));
+  return `<span class="stars" role="img" aria-label="${value} out of 5 stars"><span class="stars-on">${"★".repeat(
+    value
+  )}</span><span class="stars-off">${"★".repeat(5 - value)}</span></span>`;
+}
+
+function renderReviewResponse(response) {
+  if (!response?.body) {
+    return "";
+  }
+
+  const isPending = response.state && response.state !== "PUBLISHED";
+  return `<div class="review-response"><span class="review-response-label">Your response${
+    isPending ? " (pending)" : ""
+  }</span><p>${escapeHtml(response.body)}</p></div>`;
+}
+
+function formatReviewDate(timestamp) {
+  const days = Math.floor((Date.now() - timestamp) / (24 * 60 * 60 * 1000));
+  if (days >= 0 && days < 30) {
+    return relativeTimeFormatter.format(-days, "day");
+  }
+  return reviewDateFormatter.format(new Date(timestamp));
+}
+
+function formatSnapshotDate(value) {
+  const timestamp = Date.parse(`${value}T00:00:00.000Z`);
+  return Number.isFinite(timestamp) ? snapshotDateFormatter.format(new Date(timestamp)) : String(value);
+}
+
+// "New" means not seen in this browser. Reviews that already existed the first time an app's
+// reviews were loaded are treated as seen, so the first visit doesn't flag the whole history.
+function readSeenReviews() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SEEN_REVIEWS_STORAGE_KEY) || "null");
+    return {
+      appIds: new Set(Array.isArray(parsed?.appIds) ? parsed.appIds.map(String) : []),
+      reviewIds: new Set(Array.isArray(parsed?.reviewIds) ? parsed.reviewIds.map(String) : []),
+    };
+  } catch {
+    // Without storage there is no way to tell what's new, so nothing gets flagged.
+    return null;
+  }
+}
+
+function writeSeenReviews() {
+  try {
+    localStorage.setItem(
+      SEEN_REVIEWS_STORAGE_KEY,
+      JSON.stringify({
+        appIds: Array.from(seenReviews.appIds),
+        reviewIds: Array.from(seenReviews.reviewIds).slice(-MAX_SEEN_REVIEW_IDS),
+      })
+    );
+  } catch {
+    // Storage full or blocked; the in-memory state still works for this session.
+  }
+}
+
+function seedSeenReviews(appIds, reviews) {
+  if (!seenReviews) {
+    return;
+  }
+
+  const unseededAppIds = new Set(appIds.filter((appId) => !seenReviews.appIds.has(appId)));
+  if (!unseededAppIds.size) {
+    return;
+  }
+
+  for (const review of reviews) {
+    if (unseededAppIds.has(review.appId)) {
+      seenReviews.reviewIds.add(review.id);
+    }
+  }
+  for (const appId of unseededAppIds) {
+    seenReviews.appIds.add(appId);
+  }
+  writeSeenReviews();
+}
+
+function isNewReview(review) {
+  return Boolean(seenReviews) && !seenReviews.reviewIds.has(review.id);
+}
+
+function markReviewsAsRead() {
+  if (!seenReviews) {
+    return;
+  }
+
+  for (const review of reviewsState.reviews) {
+    seenReviews.reviewIds.add(review.id);
+  }
+  writeSeenReviews();
+  renderReviews();
+}
+
+function createRegionNames() {
+  try {
+    return new Intl.DisplayNames(undefined, { type: "region" });
+  } catch {
+    return null;
+  }
+}
+
+function countryName(code) {
+  try {
+    return regionNames?.of(code) || code;
+  } catch {
+    return code;
+  }
+}
+
+function pluralize(count, word) {
+  return count === 1 ? word : `${word}s`;
 }
 
 function drawSeriesChart(canvas, series, granularity = "day") {
